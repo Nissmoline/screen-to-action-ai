@@ -1,0 +1,14 @@
+torch
+torchvision
+opencv-python
+numpy
+Pillow
+mss
+pynput
+pyautogui
+pandas
+matplotlib
+pydantic
+pytest
+PyYAML
+

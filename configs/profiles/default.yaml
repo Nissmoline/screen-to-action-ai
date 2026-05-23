@@ -1,0 +1,27 @@
+profile_name: default
+allowed_window_title: "Desktop AI Trainer Sandbox"
+capture_region:
+  left: 0
+  top: 0
+  width: 1280
+  height: 720
+fps: 10
+action_delay: 0.2
+confidence_threshold: 0.85
+emergency_stop_hotkey: "ctrl+shift+q"
+pause_hotkey: "ctrl+shift+p"
+actions:
+  - name: no_op
+    type: none
+
+  - name: press_f1
+    type: key
+    key: f1
+
+  - name: press_f2
+    type: key
+    key: f2
+
+  - name: press_escape
+    type: key
+    key: esc
