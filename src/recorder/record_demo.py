@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -36,8 +37,16 @@ ACTION_CSV_COLUMNS = [
     "mouse_y",
 ]
 
+RECORDED_FRAME_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 EPISODE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 RECORDER_OVERLAY_TITLE = "Desktop AI Trainer Recording Status"
+INPUT_POLL_INTERVAL_SECONDS = 0.005
+MOUSE_ACTION_TYPES = {"mouse", "mouse_button", "mouse_click"}
+MOUSE_BUTTON_VIRTUAL_KEYS = {
+    "left": 0x01,
+    "right": 0x02,
+    "middle": 0x04,
+}
 
 
 @dataclass
@@ -66,6 +75,17 @@ class OverlayState:
     status: str
     total_frames: int = 0
     total_actions: int = 0
+
+
+@dataclass(frozen=True)
+class PolledInputEvent:
+    """One allowed keyboard or mouse event observed by the polling backend."""
+
+    action: ActionDefinition
+    key_or_button: str
+    event_type: str
+    mouse_x: int | None = None
+    mouse_y: int | None = None
 
 
 class RecordingStatusOverlay:
@@ -127,7 +147,8 @@ class RecordingStatusOverlay:
             self._make_noactivate_on_windows(root)
             self._build_overlay_widgets(root, tk)
             root.update_idletasks()
-            self._show_noactivate_on_windows(root)
+            self._show_noactivate_on_windows(root, x, y, width, height)
+            root.after(500, lambda: self._ensure_visible(root, x, y, width, height))
             root.after(250, self._refresh)
             root.after(100, lambda: self._make_noactivate_on_windows(root))
             root.mainloop()
@@ -210,7 +231,7 @@ class RecordingStatusOverlay:
         try:
             import ctypes
 
-            hwnd = root.winfo_id()
+            hwnd = RecordingStatusOverlay._window_handle(root)
             user32 = ctypes.windll.user32
             gwl_exstyle = -20
             ws_ex_topmost = 0x00000008
@@ -231,17 +252,56 @@ class RecordingStatusOverlay:
             pass
 
     @staticmethod
-    def _show_noactivate_on_windows(root) -> None:
+    def _show_noactivate_on_windows(root, x: int, y: int, width: int, height: int) -> None:
         try:
             import ctypes
 
+            user32 = ctypes.windll.user32
+            hwnd = RecordingStatusOverlay._window_handle(root)
+            hwnd_topmost = -1
             sw_shownoactivate = 4
-            ctypes.windll.user32.ShowWindow(root.winfo_id(), sw_shownoactivate)
+            swp_noactivate = 0x0010
+            swp_showwindow = 0x0040
+            user32.ShowWindow(hwnd, sw_shownoactivate)
+            user32.SetWindowPos(
+                hwnd,
+                hwnd_topmost,
+                x,
+                y,
+                width,
+                height,
+                swp_noactivate | swp_showwindow,
+            )
         except Exception:
             try:
                 root.deiconify()
+                root.lift()
             except Exception:
                 pass
+
+    @staticmethod
+    def _ensure_visible(root, x: int, y: int, width: int, height: int) -> None:
+        try:
+            if root.state() == "withdrawn":
+                root.deiconify()
+            root.geometry(f"{width}x{height}+{x}+{y}")
+            root.attributes("-topmost", True)
+            root.lift()
+            RecordingStatusOverlay._make_noactivate_on_windows(root)
+            RecordingStatusOverlay._show_noactivate_on_windows(root, x, y, width, height)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _window_handle(root) -> int:
+        try:
+            import ctypes
+
+            hwnd = int(root.winfo_id())
+            parent = ctypes.windll.user32.GetParent(hwnd)
+            return int(parent or hwnd)
+        except Exception:
+            return int(root.winfo_id())
 
 
 def require_recording_window(profile: ProfileConfig) -> str:
@@ -286,6 +346,11 @@ def build_episode_paths(
 def prepare_episode_folder(paths: EpisodePaths) -> None:
     """Create the episode folder and empty CSV with the expected columns."""
     paths.frames_dir.mkdir(parents=True, exist_ok=True)
+    for frame_path in paths.frames_dir.iterdir():
+        if frame_path.is_file() and frame_path.suffix.casefold() in RECORDED_FRAME_EXTENSIONS:
+            frame_path.unlink()
+    if paths.metadata_json.is_file():
+        paths.metadata_json.unlink()
     write_actions_header(paths.actions_csv)
 
 
@@ -357,7 +422,7 @@ def build_mouse_action_lookup(action_space: ActionSpace) -> dict[str, ActionDefi
     """Map normalized mouse button names to configured mouse actions."""
     lookup: dict[str, ActionDefinition] = {}
     for action in action_space:
-        if action.type not in {"mouse", "mouse_button", "mouse_click"}:
+        if action.type not in MOUSE_ACTION_TYPES:
             continue
         params = action.params or {}
         button = params.get("button") or params.get("key") or action.key
@@ -387,6 +452,165 @@ def normalize_button_name(button: object) -> str:
     if text.startswith("button."):
         text = text[7:]
     return text
+
+
+class Win32InputPoller:
+    """Poll allowed keyboard/mouse state through the Windows desktop input API."""
+
+    def __init__(
+        self,
+        key_actions: dict[str, ActionDefinition],
+        mouse_actions: dict[str, ActionDefinition],
+        emergency_stop_hotkey: str,
+        pause_hotkey: str,
+        is_pressed,
+        cursor_position,
+    ) -> None:
+        self.key_actions = key_actions
+        self.mouse_actions = mouse_actions
+        self.emergency_hotkey_keys = parse_hotkey_virtual_keys(emergency_stop_hotkey)
+        self.pause_hotkey_keys = parse_hotkey_virtual_keys(pause_hotkey)
+        self.is_pressed = is_pressed
+        self.cursor_position = cursor_position
+        self._previous_states: dict[str, bool] = {}
+
+    @classmethod
+    def from_action_maps(
+        cls,
+        key_actions: dict[str, ActionDefinition],
+        mouse_actions: dict[str, ActionDefinition],
+        emergency_stop_hotkey: str,
+        pause_hotkey: str,
+    ) -> "Win32InputPoller | None":
+        if not sys.platform.startswith("win"):
+            return None
+
+        try:
+            import ctypes
+        except Exception:
+            return None
+
+        user32 = ctypes.windll.user32
+
+        def is_pressed(virtual_key: int) -> bool:
+            return bool(user32.GetAsyncKeyState(virtual_key) & 0x8000)
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        def cursor_position() -> tuple[int, int]:
+            point = Point()
+            user32.GetCursorPos(ctypes.byref(point))
+            return int(point.x), int(point.y)
+
+        return cls(
+            key_actions=key_actions,
+            mouse_actions=mouse_actions,
+            emergency_stop_hotkey=emergency_stop_hotkey,
+            pause_hotkey=pause_hotkey,
+            is_pressed=is_pressed,
+            cursor_position=cursor_position,
+        )
+
+    def poll_hotkeys(self, hotkey_state: HotkeyState, on_pause_change=None) -> None:
+        if self._hotkey_pressed_once("hotkey:emergency", self.emergency_hotkey_keys):
+            hotkey_state.emergency_stop()
+            return
+
+        if self._hotkey_pressed_once("hotkey:pause", self.pause_hotkey_keys):
+            paused = hotkey_state.toggle_pause()
+            if on_pause_change is not None:
+                on_pause_change(paused)
+
+    def poll_actions(self, emit: bool = True) -> list[PolledInputEvent]:
+        events: list[PolledInputEvent] = []
+
+        for key_name, action in self.key_actions.items():
+            virtual_key = virtual_key_for_key_name(key_name)
+            if virtual_key is None:
+                continue
+            state_key = f"key:{key_name}"
+            is_down = self.is_pressed(virtual_key)
+            was_down = self._previous_states.get(state_key, False)
+            if emit and is_down and not was_down:
+                events.append(
+                    PolledInputEvent(
+                        action=action,
+                        key_or_button=key_name,
+                        event_type="key_press",
+                    )
+                )
+            self._previous_states[state_key] = is_down
+
+        for button_name, action in self.mouse_actions.items():
+            virtual_key = MOUSE_BUTTON_VIRTUAL_KEYS.get(button_name)
+            if virtual_key is None:
+                continue
+            state_key = f"mouse:{button_name}"
+            is_down = self.is_pressed(virtual_key)
+            was_down = self._previous_states.get(state_key, False)
+            if emit and is_down and not was_down:
+                mouse_x, mouse_y = self.cursor_position()
+                events.append(
+                    PolledInputEvent(
+                        action=action,
+                        key_or_button=button_name,
+                        event_type="mouse_press",
+                        mouse_x=mouse_x,
+                        mouse_y=mouse_y,
+                    )
+                )
+            self._previous_states[state_key] = is_down
+
+        return events
+
+    def _hotkey_pressed_once(self, state_key: str, virtual_keys: list[int]) -> bool:
+        if not virtual_keys:
+            return False
+        is_down = all(self.is_pressed(virtual_key) for virtual_key in virtual_keys)
+        was_down = self._previous_states.get(state_key, False)
+        self._previous_states[state_key] = is_down
+        return is_down and not was_down
+
+
+def parse_hotkey_virtual_keys(hotkey: str) -> list[int]:
+    keys: list[int] = []
+    for part in hotkey.split("+"):
+        virtual_key = virtual_key_for_key_name(part)
+        if virtual_key is not None:
+            keys.append(virtual_key)
+    return keys
+
+
+def virtual_key_for_key_name(key_name: object) -> int | None:
+    text = normalize_key_name(key_name)
+    if len(text) == 1 and "a" <= text <= "z":
+        return ord(text.upper())
+    if len(text) == 1 and "0" <= text <= "9":
+        return ord(text)
+    if text.startswith("f"):
+        try:
+            function_key_number = int(text[1:])
+        except ValueError:
+            return None
+        if 1 <= function_key_number <= 24:
+            return 0x6F + function_key_number
+
+    aliases = {
+        "ctrl": 0x11,
+        "control": 0x11,
+        "shift": 0x10,
+        "alt": 0x12,
+        "esc": 0x1B,
+        "escape": 0x1B,
+        "space": 0x20,
+        "enter": 0x0D,
+        "return": 0x0D,
+        "left": MOUSE_BUTTON_VIRTUAL_KEYS["left"],
+        "right": MOUSE_BUTTON_VIRTUAL_KEYS["right"],
+        "middle": MOUSE_BUTTON_VIRTUAL_KEYS["middle"],
+    }
+    return aliases.get(text)
 
 
 def _utc_now_iso() -> str:
@@ -448,6 +672,8 @@ def run_recording(
     action_space = ActionSpace.from_profile(profile)
     key_actions = build_key_action_lookup(action_space)
     mouse_actions = build_mouse_action_lookup(action_space)
+    print("Recording allowed keys:", ", ".join(sorted(key_actions)) or "none")
+    print("Recording allowed mouse buttons:", ", ".join(sorted(mouse_actions)) or "none")
     capture = ScreenCapture(profile.capture_region, profile.fps)
     hotkey_state = HotkeyState()
     counters = RecordingCounters()
@@ -457,6 +683,7 @@ def run_recording(
     started_at = time.monotonic()
     next_frame_at = started_at
     last_window_check_at = started_at
+    last_status_print_at = started_at
     overlay = RecordingStatusOverlay(profile, episode) if show_overlay else None
 
     def on_pause_change(paused: bool) -> None:
@@ -472,13 +699,29 @@ def run_recording(
         on_pause_change=on_pause_change,
     )
 
-    try:
-        from pynput import keyboard, mouse
-    except ModuleNotFoundError as exc:
-        raise HotkeyError(
-            "pynput is required to record keyboard and mouse events. "
-            "Install dependencies with: pip install -r requirements.txt"
-        ) from exc
+    input_poller = Win32InputPoller.from_action_maps(
+        key_actions=key_actions,
+        mouse_actions=mouse_actions,
+        emergency_stop_hotkey=profile.emergency_stop_hotkey,
+        pause_hotkey=profile.pause_hotkey,
+    )
+
+    keyboard = None
+    mouse = None
+    if input_poller is None:
+        try:
+            from pynput import keyboard, mouse
+        except ModuleNotFoundError as exc:
+            raise HotkeyError(
+                "pynput is required to record keyboard and mouse events. "
+                "Install dependencies with: pip install -r requirements.txt"
+            ) from exc
+        print("Input backend: pynput listener.")
+    else:
+        print(
+            "Input backend: win32 polling. "
+            "This is usually more reliable for games."
+        )
 
     with paths.actions_csv.open("a", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=ACTION_CSV_COLUMNS)
@@ -527,11 +770,58 @@ def run_recording(
                 with counters_lock:
                     overlay.update(counters.total_frames, counters.total_actions, hotkey_state.paused)
 
-        keyboard_listener = keyboard.Listener(on_press=on_press)
-        mouse_listener = mouse.Listener(on_click=on_click)
-        hotkeys.start()
-        keyboard_listener.start()
-        mouse_listener.start()
+        keyboard_listener = None
+        mouse_listener = None
+        hotkeys_started = False
+        polling_stop_event = Event()
+        polling_thread = None
+
+        def write_polled_event(event: PolledInputEvent) -> None:
+            _write_action_row(
+                writer,
+                csv_file,
+                csv_lock,
+                counters,
+                counters_lock,
+                event.action,
+                event.key_or_button,
+                event.event_type,
+                mouse_x=event.mouse_x,
+                mouse_y=event.mouse_y,
+            )
+            if overlay is not None:
+                with counters_lock:
+                    overlay.update(
+                        counters.total_frames,
+                        counters.total_actions,
+                        hotkey_state.paused,
+                    )
+
+        def poll_input_loop() -> None:
+            assert input_poller is not None
+            while not polling_stop_event.is_set() and not hotkey_state.emergency_stopped:
+                input_poller.poll_hotkeys(hotkey_state, on_pause_change=on_pause_change)
+                if hotkey_state.emergency_stopped:
+                    break
+                try:
+                    polled_events = input_poller.poll_actions(emit=not hotkey_state.paused)
+                    for event in polled_events:
+                        write_polled_event(event)
+                except Exception as exc:
+                    print(f"Input polling stopped after an error: {exc}")
+                    break
+                time.sleep(INPUT_POLL_INTERVAL_SECONDS)
+
+        if input_poller is None:
+            keyboard_listener = keyboard.Listener(on_press=on_press)
+            mouse_listener = mouse.Listener(on_click=on_click)
+            hotkeys.start()
+            hotkeys_started = True
+            keyboard_listener.start()
+            mouse_listener.start()
+        else:
+            polling_thread = Thread(target=poll_input_loop, name="win32-input-poller", daemon=True)
+            polling_thread.start()
         if overlay is not None:
             overlay.start()
 
@@ -554,6 +844,17 @@ def run_recording(
                         break
                     last_window_check_at = now
 
+                if now - last_status_print_at >= 2.0:
+                    with counters_lock:
+                        total_frames = counters.total_frames
+                        total_actions = counters.total_actions
+                    status = "paused" if hotkey_state.paused else "recording"
+                    print(
+                        f"Recording status: {status}, "
+                        f"frames={total_frames}, actions={total_actions}"
+                    )
+                    last_status_print_at = now
+
                 if hotkey_state.paused:
                     time.sleep(0.05)
                     next_frame_at = time.monotonic()
@@ -574,11 +875,17 @@ def run_recording(
                         overlay.update(counters.total_frames, counters.total_actions, hotkey_state.paused)
                 next_frame_at += capture.frame_interval_seconds
         finally:
+            polling_stop_event.set()
+            if polling_thread is not None:
+                polling_thread.join(timeout=1.0)
             if overlay is not None:
                 overlay.close()
-            hotkeys.stop()
-            keyboard_listener.stop()
-            mouse_listener.stop()
+            if hotkeys_started:
+                hotkeys.stop()
+            if keyboard_listener is not None:
+                keyboard_listener.stop()
+            if mouse_listener is not None:
+                mouse_listener.stop()
 
     end_time = _utc_now_iso()
     metadata = build_metadata(

@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 
 from src.config import PROJECT_ROOT
-from src.dataset.build_dataset import DATASET_COLUMNS, resolve_dataset_frame_path
+from src.dataset.build_dataset import REQUIRED_DATASET_COLUMNS, resolve_dataset_frame_path
 
 
 class DatasetVisualizationError(RuntimeError):
@@ -48,7 +48,11 @@ def read_dataset_rows(path: str | Path) -> list[dict[str, str]]:
 
     with dataset_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
-        missing_columns = [column for column in DATASET_COLUMNS if column not in (reader.fieldnames or [])]
+        missing_columns = [
+            column
+            for column in REQUIRED_DATASET_COLUMNS
+            if column not in (reader.fieldnames or [])
+        ]
         if missing_columns:
             raise DatasetVisualizationError(
                 f"Dataset file is missing required columns: {', '.join(missing_columns)}"
@@ -110,7 +114,7 @@ def save_grid_preview(
         frame = _load_frame_image(row["frame_path"], thumb_size)
         canvas.paste(frame, (x, y))
 
-        label = _truncate_label(row.get("action_name", ""), max_chars=24)
+        label = _truncate_label(format_sample_label(row), max_chars=24)
         draw.text((x, y + thumb_size[1] + 4), label, fill=(235, 235, 235), font=font)
 
     preview_path = Path(output_path)
@@ -139,6 +143,15 @@ def _truncate_label(label: str, max_chars: int) -> str:
     if len(label) <= max_chars:
         return label
     return f"{label[: max_chars - 3]}..."
+
+
+def format_sample_label(row: dict[str, str]) -> str:
+    label = row.get("action_name", "")
+    mouse_x = row.get("mouse_x", "")
+    mouse_y = row.get("mouse_y", "")
+    if mouse_x and mouse_y:
+        return f"{label} @ {mouse_x},{mouse_y}"
+    return label
 
 
 def build_parser() -> argparse.ArgumentParser:

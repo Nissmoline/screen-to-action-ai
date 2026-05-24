@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from src.config import PROJECT_ROOT, ProfileValidationError, load_profile
-from src.dataset.build_dataset import DATASET_COLUMNS, resolve_dataset_frame_path
+from src.dataset.build_dataset import REQUIRED_DATASET_COLUMNS, resolve_dataset_frame_path
 from src.input_control.action_space import ActionSpace
 
 
@@ -191,7 +191,11 @@ def read_dataset_rows(path: str | Path) -> list[dict[str, str]]:
 
     with dataset_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
-        missing = [column for column in DATASET_COLUMNS if column not in (reader.fieldnames or [])]
+        missing = [
+            column
+            for column in REQUIRED_DATASET_COLUMNS
+            if column not in (reader.fieldnames or [])
+        ]
         if missing:
             raise TrainingError(f"Dataset is missing required columns: {', '.join(missing)}")
         rows = list(reader)

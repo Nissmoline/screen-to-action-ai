@@ -88,6 +88,20 @@ def test_keyboard_controller_executes_explicit_mouse_click(monkeypatch) -> None:
     assert calls == [("click", "left")]
 
 
+def test_keyboard_controller_executes_profile_mouse_click(monkeypatch) -> None:
+    profile = load_profile("lineage2_private")
+    action_space = ActionSpace.from_profile(profile)
+    calls: list[tuple[str, str]] = []
+    fake_pyautogui = types.SimpleNamespace(click=lambda button: calls.append(("click", button)))
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+
+    controller = KeyboardMouseController(action_space)
+    result = controller.execute(action_space.get_by_name("left_click"))
+
+    assert result == "mouse_click:left"
+    assert calls == [("click", "left")]
+
+
 def test_rate_limiter_uses_action_delay() -> None:
     limiter = RateLimiter.from_action_delay(10.0)
 

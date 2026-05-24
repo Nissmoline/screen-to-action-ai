@@ -23,22 +23,58 @@ actions:
     type: key
     key: f2
 
+  - name: press_f3
+    type: key
+    key: f3
+
+  - name: press_f4
+    type: key
+    key: f4
+
+  - name: press_f5
+    type: key
+    key: f5
+
+  - name: press_f6
+    type: key
+    key: f6
+
+  - name: press_f7
+    type: key
+    key: f7
+
+  - name: press_f8
+    type: key
+    key: f8
+
+  - name: press_f9
+    type: key
+    key: f9
+
+  - name: press_f10
+    type: key
+    key: f10
+
+  - name: press_f11
+    type: key
+    key: f11
+
+  - name: press_f12
+    type: key
+    key: f12
+
   - name: press_escape
     type: key
     key: esc
 
-  - name: move_forward
-    type: key
-    key: w
+  - name: left_click
+    type: mouse_click
+    button: left
 
-  - name: move_backward
-    type: key
-    key: s
+  - name: right_click
+    type: mouse_click
+    button: right
 
-  - name: turn_left
-    type: key
-    key: a
-
-  - name: turn_right
-    type: key
-    key: d
+  - name: middle_click
+    type: mouse_click
+    button: middle

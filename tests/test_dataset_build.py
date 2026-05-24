@@ -73,6 +73,39 @@ def test_dataset_splits_exist(tmp_path: Path) -> None:
     assert splits == {"train", "val", "test"}
 
 
+def test_dataset_preserves_mouse_click_coordinates(tmp_path: Path) -> None:
+    demos_root = _create_demo_root(tmp_path)
+    datasets_root = tmp_path / "datasets"
+    result = build_dataset(
+        profile_name="lineage2_private",
+        demos_root=demos_root,
+        datasets_root=datasets_root,
+    )
+
+    rows = _read_dataset_rows(result.dataset_csv)
+    click_rows = [row for row in rows if row["action_name"] == "left_click"]
+
+    assert click_rows
+    assert click_rows[0]["key_or_button"] == "left"
+    assert click_rows[0]["event_type"] == "mouse_press"
+    assert click_rows[0]["mouse_x"] == "640"
+    assert click_rows[0]["mouse_y"] == "360"
+
+
+def test_dataset_ignores_mouse_release_labels(tmp_path: Path) -> None:
+    demos_root = _create_demo_root(tmp_path)
+    datasets_root = tmp_path / "datasets"
+    result = build_dataset(
+        profile_name="lineage2_private",
+        demos_root=demos_root,
+        datasets_root=datasets_root,
+    )
+
+    rows = _read_dataset_rows(result.dataset_csv)
+
+    assert not any(row["event_type"] == "mouse_release" for row in rows)
+
+
 def test_dataset_preview_is_created(tmp_path: Path) -> None:
     demos_root = _create_demo_root(tmp_path)
     datasets_root = tmp_path / "datasets"
@@ -150,12 +183,36 @@ def _create_demo_root(tmp_path: Path) -> Path:
             {
                 "timestamp": "",
                 "frame_id": "8",
-                "action_name": "turn_left",
-                "action_id": "6",
-                "key_or_button": "a",
+                "action_name": "press_f2",
+                "action_id": "2",
+                "key_or_button": "f2",
                 "event_type": "key_press",
                 "mouse_x": "",
                 "mouse_y": "",
+            }
+        )
+        writer.writerow(
+            {
+                "timestamp": "",
+                "frame_id": "9",
+                "action_name": "left_click",
+                "action_id": "14",
+                "key_or_button": "left",
+                "event_type": "mouse_press",
+                "mouse_x": "640",
+                "mouse_y": "360",
+            }
+        )
+        writer.writerow(
+            {
+                "timestamp": "",
+                "frame_id": "10",
+                "action_name": "left_click",
+                "action_id": "14",
+                "key_or_button": "left",
+                "event_type": "mouse_release",
+                "mouse_x": "640",
+                "mouse_y": "360",
             }
         )
 

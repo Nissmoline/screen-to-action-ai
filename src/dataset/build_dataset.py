@@ -15,13 +15,20 @@ from src.config import PROJECT_ROOT, ProfileValidationError, load_profile
 from src.input_control.action_space import ActionDefinition, ActionSpace
 
 
-DATASET_COLUMNS = [
+REQUIRED_DATASET_COLUMNS = [
     "frame_path",
     "action_id",
     "action_name",
     "timestamp",
     "episode",
     "split",
+]
+
+DATASET_COLUMNS = REQUIRED_DATASET_COLUMNS + [
+    "key_or_button",
+    "event_type",
+    "mouse_x",
+    "mouse_y",
 ]
 
 SUPPORTED_FRAME_EXTENSIONS = {".png", ".jpg", ".jpeg"}
@@ -48,6 +55,10 @@ class RecordedAction:
     action: ActionDefinition
     frame_id: int | None
     timestamp: float | None
+    key_or_button: str = ""
+    event_type: str = ""
+    mouse_x: str = ""
+    mouse_y: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,12 +132,13 @@ def build_episode_rows(
 
     rows: list[dict[str, str]] = []
     for frame in frames:
-        action = choose_action_for_frame(
+        recorded_action = choose_action_for_frame(
             frame,
             actions,
             action_space.no_op,
             max_time_distance=frame_interval / 2.0,
         )
+        action = recorded_action.action if recorded_action is not None else action_space.no_op
         rows.append(
             {
                 "frame_path": serialize_frame_path(frame.path),
@@ -135,6 +147,10 @@ def build_episode_rows(
                 "timestamp": "" if frame.timestamp is None else f"{frame.timestamp:.6f}",
                 "episode": frame.episode,
                 "split": "",
+                "key_or_button": "" if recorded_action is None else recorded_action.key_or_button,
+                "event_type": "" if recorded_action is None else recorded_action.event_type,
+                "mouse_x": "" if recorded_action is None else recorded_action.mouse_x,
+                "mouse_y": "" if recorded_action is None else recorded_action.mouse_y,
             }
         )
     return rows
@@ -193,6 +209,8 @@ def read_actions_csv(path: str | Path, action_space: ActionSpace) -> list[Record
     with actions_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         for row in reader:
+            if (row.get("event_type") or "").strip().casefold() == "mouse_release":
+                continue
             action = _resolve_action(row, action_space)
             if action is None:
                 continue
@@ -201,6 +219,10 @@ def read_actions_csv(path: str | Path, action_space: ActionSpace) -> list[Record
                     action=action,
                     frame_id=_parse_optional_int(row.get("frame_id")),
                     timestamp=_parse_optional_float(row.get("timestamp")),
+                    key_or_button=(row.get("key_or_button") or "").strip(),
+                    event_type=(row.get("event_type") or "").strip(),
+                    mouse_x=(row.get("mouse_x") or "").strip(),
+                    mouse_y=(row.get("mouse_y") or "").strip(),
                 )
             )
     return actions
@@ -211,25 +233,25 @@ def choose_action_for_frame(
     actions: list[RecordedAction],
     no_op_action: ActionDefinition,
     max_time_distance: float,
-) -> ActionDefinition:
+) -> RecordedAction | None:
     """Choose the nearest allowed action for a frame, or ``no_op``."""
     if not actions:
-        return no_op_action
+        return None
 
     if frame.timestamp is not None:
         timestamp_actions = [action for action in actions if action.timestamp is not None]
         if timestamp_actions:
             nearest = min(timestamp_actions, key=lambda action: abs(action.timestamp - frame.timestamp))
             if abs(nearest.timestamp - frame.timestamp) <= max_time_distance:
-                return nearest.action
+                return nearest
 
     frame_id_actions = [action for action in actions if action.frame_id is not None]
     if frame_id_actions:
         nearest = min(frame_id_actions, key=lambda action: abs(action.frame_id - frame.frame_id))
         if nearest.frame_id == frame.frame_id:
-            return nearest.action
+            return nearest
 
-    return no_op_action
+    return None
 
 
 def assign_splits(

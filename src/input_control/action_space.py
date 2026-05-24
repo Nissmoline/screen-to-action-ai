@@ -76,6 +76,10 @@ def format_action(action: ActionDefinition) -> str:
     """Return a compact human-readable action line."""
     if action.key:
         return f"{action.id}: {action.name} ({action.type}, key={action.key})"
+    if action.type in {"mouse", "mouse_button", "mouse_click"} and action.params:
+        button = action.params.get("button") or action.params.get("mouse_button")
+        if button:
+            return f"{action.id}: {action.name} ({action.type}, button={button})"
     return f"{action.id}: {action.name} ({action.type})"
 
 
